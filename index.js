@@ -19,6 +19,7 @@ const client = new MongoClient(uri, {
   serverApi: ServerApiVersion.v1,
 });
 
+// firebase admin sdk initialize
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
@@ -46,6 +47,7 @@ async function run() {
     await client.connect();
     const db = client.db("clubnest");
     const userCollection = db.collection("users");
+    const clubCollection = db.collection("clubs");
 
     // Save User (Register + Google Login) → role default "member"
     app.post("/api/auth/save-user", async (req, res) => {
@@ -158,6 +160,84 @@ async function run() {
         res.json({ success: true, message: "Role updated to " + newRole });
       }
     );
+
+    app.post("/clubs", async (req, res) => {
+      const {
+        clubName,
+        description,
+        category,
+        location,
+        bannerImage,
+        membershipFee,
+        managerEmail,
+        status,
+        createdAt,
+        updatedAt,
+      } = req.body;
+
+      if (
+        !clubName ||
+        !description ||
+        !category ||
+        !location ||
+        !managerEmail
+      ) {
+        return res.status(400).json({ message: "Required fields missing" });
+      }
+
+      const newClub = {
+        clubName,
+        description,
+        category,
+        location,
+        bannerImage: bannerImage || "",
+        membershipFee: membershipFee || 0,
+        status: status || "pending",
+        managerEmail,
+        createdAt,
+        updatedAt,
+      };
+
+      const result = await clubCollection.insertOne(newClub);
+      res.json({ success: true, clubId: result.insertedId });
+    });
+
+    app.get("/clubs", async (req, res) => {
+      const { managerEmail } = req.query;
+
+      if (managerEmail) {
+        // Only fetch clubs managed by logged-in manager
+        const clubs = await clubCollection.find({ managerEmail }).toArray();
+        return res.json(clubs);
+      }
+
+      // Optional: return all approved clubs for public pages
+      const allClubs = await clubCollection
+        .find({ status: "approved" })
+        .toArray();
+      res.json(allClubs);
+    });
+
+    app.patch("/clubs/:id", async (req, res) => {
+      const { id } = req.params;
+      const updates = req.body;
+
+      const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+      if (!club) return res.status(404).json({ message: "Club not found" });
+
+      // Only manager who created it can update
+      if (club.managerEmail !== req.decodedUser.email) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      updates.updatedAt = new Date();
+      await clubCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updates }
+      );
+
+      res.json({ success: true, message: "Club updated" });
+    });
 
     console.log("MongoDB Connected + All Routes Ready");
   } catch (err) {
