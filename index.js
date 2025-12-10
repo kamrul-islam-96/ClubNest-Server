@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
 const serviceAccount = require("./firebase-adminsdk.json");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
 
 const app = express();
@@ -48,6 +48,7 @@ async function run() {
     const db = client.db("clubnest");
     const userCollection = db.collection("users");
     const clubCollection = db.collection("clubs");
+    const membershipCollection = db.collection("memberships");
 
     // Save User (Register + Google Login) → role default "member"
     app.post("/api/auth/save-user", async (req, res) => {
@@ -216,6 +217,35 @@ async function run() {
         .find({ status: "approved" })
         .toArray();
       res.json(allClubs);
+    });
+
+    app.get("/clubs/:id", async (req, res) => {
+      const { id } = req.params;
+
+      try {
+        const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+        if (!club) return res.status(404).json({ message: "Club not found" });
+
+        // Active members count
+        const membersCount = await membershipCollection
+          .find({ clubId: id, status: "active" })
+          .count();
+
+        // Manager info
+        const manager = await userCollection.findOne({
+          email: club.managerEmail,
+        });
+
+        res.json({
+          ...club,
+          membersCount,
+          managerName: manager?.name || "Unknown",
+          managerEmail: manager?.email || club.managerEmail,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
+      }
     });
 
     app.patch("/clubs/:id", async (req, res) => {
