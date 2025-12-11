@@ -1,9 +1,12 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
+const Stripe = require("stripe"); 
 const serviceAccount = require("./firebase-adminsdk.json");
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-require("dotenv").config();
 
 const app = express();
 app.use(cors());
@@ -268,6 +271,79 @@ async function run() {
 
       res.json({ success: true, message: "Club updated" });
     });
+
+    // Create Membership route updated to handle free vs paid
+    app.post("/memberships", verifyFirebaseToken, async (req, res) => {
+      const { userEmail, clubId } = req.body;
+      if (!userEmail || !clubId)
+        return res.status(400).json({ message: "Missing fields" });
+
+      // 🔹 fetch club to check membership fee
+      const club = await clubCollection.findOne({ _id: new ObjectId(clubId) }); // 🔹 new
+      if (!club) return res.status(404).json({ message: "Club not found" }); // 🔹 new
+
+      // 🔹 determine initial membership status based on fee
+      const status = club.membershipFee > 0 ? "pendingPayment" : "active"; // 🔹 new
+
+      const membershipData = {
+        userEmail,
+        clubId,
+        status, 
+        paymentId: null, 
+        joinedAt: new Date(),
+        expiresAt: null,
+      };
+
+      const result = await membershipCollection.insertOne(membershipData);
+      res.json({
+        success: true,
+        membershipId: result.insertedId,
+        status, 
+      });
+    });
+
+    // Create Payment Intent route (for paid memberships)
+    app.post(
+      "/create-payment-intent",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { amount, currency, userEmail, clubId } = req.body;
+        if (!amount || !currency || !userEmail || !clubId)
+          return res.status(400).json({ message: "Missing fields" });
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount,
+          currency,
+          metadata: { userEmail, clubId, type: "membership" },
+        });
+
+        res.json({ clientSecret: paymentIntent.client_secret }); 
+      }
+    );
+
+    // Confirm Membership after Payment Success
+    app.patch(
+      "/memberships/:id/confirm",
+      verifyFirebaseToken,
+      async (req, res) => {
+        // 🔹 new
+        const { id } = req.params;
+        const { paymentId } = req.body;
+
+        const membership = await membershipCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!membership)
+          return res.status(404).json({ message: "Membership not found" });
+
+        await membershipCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "active", paymentId, updatedAt: new Date() } }
+        );
+
+        res.json({ success: true, message: "Membership activated" });
+      }
+    );
 
     console.log("MongoDB Connected + All Routes Ready");
   } catch (err) {
