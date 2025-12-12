@@ -3,7 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const Stripe = require("stripe"); 
+const Stripe = require("stripe");
 const serviceAccount = require("./firebase-adminsdk.json");
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
@@ -50,8 +50,24 @@ async function run() {
     await client.connect();
     const db = client.db("clubnest");
     const userCollection = db.collection("users");
-    const clubCollection = db.collection("clubs");
+    const clubsCollection = db.collection("clubs");
     const membershipCollection = db.collection("memberships");
+
+    // MIDDLEWARE: Verify Admin
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decodedUser?.email;
+
+      const user = await userCollection.findOne({ email });
+
+      if (!user || user.role !== "admin") {
+        return res
+          .status(403)
+          .json({ message: "Forbidden: Admin access only" });
+      }
+
+      req.requestedBy = email;
+      next();
+    };
 
     // Save User (Register + Google Login) → role default "member"
     app.post("/api/auth/save-user", async (req, res) => {
@@ -109,24 +125,6 @@ async function run() {
       res.json(users);
     });
 
-    // MIDDLEWARE: Verify Admin
-    const verifyAdmin = async (req, res, next) => {
-      const email = req.decodedUser?.email;
-
-      if (!email) return res.status(401).json({ message: "Unauthorized" });
-
-      const user = await userCollection.findOne({ email });
-
-      if (!user || user.role !== "admin") {
-        return res
-          .status(403)
-          .json({ message: "Forbidden: Admin access only" });
-      }
-
-      req.requestedBy = user.email;
-      next();
-    };
-
     app.patch(
       "/api/users/role",
       verifyFirebaseToken,
@@ -174,9 +172,6 @@ async function run() {
         bannerImage,
         membershipFee,
         managerEmail,
-        status,
-        createdAt,
-        updatedAt,
       } = req.body;
 
       if (
@@ -196,13 +191,13 @@ async function run() {
         location,
         bannerImage: bannerImage || "",
         membershipFee: membershipFee || 0,
-        status: status || "pending",
+        status: "pending",
         managerEmail,
-        createdAt,
-        updatedAt,
+        createdAt: new Date(),
+        updatedAt: new Date(),
       };
 
-      const result = await clubCollection.insertOne(newClub);
+      const result = await clubsCollection.insertOne(newClub);
       res.json({ success: true, clubId: result.insertedId });
     });
 
@@ -211,12 +206,12 @@ async function run() {
 
       if (managerEmail) {
         // Only fetch clubs managed by logged-in manager
-        const clubs = await clubCollection.find({ managerEmail }).toArray();
+        const clubs = await clubsCollection.find({ managerEmail }).toArray();
         return res.json(clubs);
       }
 
       // Optional: return all approved clubs for public pages
-      const allClubs = await clubCollection
+      const allClubs = await clubsCollection
         .find({ status: "approved" })
         .toArray();
       res.json(allClubs);
@@ -226,7 +221,7 @@ async function run() {
       const { id } = req.params;
 
       try {
-        const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+        const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
         if (!club) return res.status(404).json({ message: "Club not found" });
 
         // Active members count
@@ -251,26 +246,85 @@ async function run() {
       }
     });
 
-    app.patch("/clubs/:id", async (req, res) => {
+    app.patch("/clubs/:id", verifyFirebaseToken, async (req, res) => {
       const { id } = req.params;
       const updates = req.body;
 
-      const club = await clubCollection.findOne({ _id: new ObjectId(id) });
+      const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
       if (!club) return res.status(404).json({ message: "Club not found" });
 
-      // Only manager who created it can update
       if (club.managerEmail !== req.decodedUser.email) {
         return res.status(403).json({ message: "Forbidden" });
       }
 
       updates.updatedAt = new Date();
-      await clubCollection.updateOne(
+
+      await clubsCollection.updateOne(
         { _id: new ObjectId(id) },
         { $set: updates }
       );
 
       res.json({ success: true, message: "Club updated" });
     });
+
+    app.get(
+      "/api/admin/clubs",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const clubs = await clubsCollection
+          .find({ status: "pending" })
+          .toArray();
+        // Ensure membershipFee is numeric for frontend
+        const fixedClubs = clubs.map((c) => ({
+          ...c,
+          membershipFee: Number(c.membershipFee || 0),
+        }));
+        res.json(fixedClubs);
+      }
+    );
+
+    // PATCH: Approve club
+    app.patch(
+      "/api/admin/clubs/:id/approve",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id))
+          return res.status(400).json({ error: "Invalid ID" });
+
+        const result = await clubsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "approved", updatedAt: new Date() } }
+        );
+
+        if (result.matchedCount === 0)
+          return res.status(404).json({ error: "Club not found" });
+        res.json({ success: true });
+      }
+    );
+
+    // PATCH: Reject club
+    app.patch(
+      "/api/admin/clubs/:id/reject",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id))
+          return res.status(400).json({ error: "Invalid ID" });
+
+        const result = await clubsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "rejected", updatedAt: new Date() } }
+        );
+
+        if (result.matchedCount === 0)
+          return res.status(404).json({ error: "Club not found" });
+        res.json({ success: true });
+      }
+    );
 
     // Create Membership route updated to handle free vs paid
     app.post("/memberships", verifyFirebaseToken, async (req, res) => {
@@ -279,7 +333,7 @@ async function run() {
         return res.status(400).json({ message: "Missing fields" });
 
       // 🔹 fetch club to check membership fee
-      const club = await clubCollection.findOne({ _id: new ObjectId(clubId) }); // 🔹 new
+      const club = await clubsCollection.findOne({ _id: new ObjectId(clubId) }); // 🔹 new
       if (!club) return res.status(404).json({ message: "Club not found" }); // 🔹 new
 
       // 🔹 determine initial membership status based on fee
@@ -288,8 +342,8 @@ async function run() {
       const membershipData = {
         userEmail,
         clubId,
-        status, 
-        paymentId: null, 
+        status,
+        paymentId: null,
         joinedAt: new Date(),
         expiresAt: null,
       };
@@ -298,7 +352,7 @@ async function run() {
       res.json({
         success: true,
         membershipId: result.insertedId,
-        status, 
+        status,
       });
     });
 
@@ -317,7 +371,7 @@ async function run() {
           metadata: { userEmail, clubId, type: "membership" },
         });
 
-        res.json({ clientSecret: paymentIntent.client_secret }); 
+        res.json({ clientSecret: paymentIntent.client_secret });
       }
     );
 
@@ -326,7 +380,6 @@ async function run() {
       "/memberships/:id/confirm",
       verifyFirebaseToken,
       async (req, res) => {
-        // 🔹 new
         const { id } = req.params;
         const { paymentId } = req.body;
 
