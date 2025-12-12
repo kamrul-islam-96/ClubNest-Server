@@ -435,6 +435,42 @@ async function run() {
       }
     );
 
+    // backend/server.js বা যেখানে তুমি routes লিখেছ
+    app.get("/api/payments", verifyFirebaseToken, async (req, res) => {
+      try {
+        const db = client.db("clubnest");
+        const membershipCollection = db.collection("memberships");
+        const clubsCollection = db.collection("clubs");
+
+        const memberships = await membershipCollection
+          .find({ paymentId: { $ne: null } })
+          .toArray();
+
+        // যদি কিছু না থাকে, empty array return করবে
+        if (!memberships) return res.json([]);
+
+        const payments = await Promise.all(
+          memberships.map(async (m) => {
+            const club = await clubsCollection.findOne({
+              _id: new ObjectId(m.clubId),
+            });
+            return {
+              _id: m._id,
+              userEmail: m.userEmail,
+              clubName: club?.clubName || "Unknown Club",
+              amount: club?.membershipFee || 0,
+              date: m.updatedAt || m.joinedAt,
+            };
+          })
+        );
+
+        res.json(payments); // <-- **always array**
+      } catch (err) {
+        console.error(err);
+        res.status(500).json([]); // <-- error হলে ও array
+      }
+    });
+
     console.log("MongoDB Connected + All Routes Ready");
   } catch (err) {
     console.error("MongoDB connection error:", err);
