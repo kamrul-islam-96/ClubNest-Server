@@ -398,6 +398,43 @@ async function run() {
       }
     );
 
+    app.patch(
+      "/api/users/role",
+      verifyFirebaseToken, // verify token first
+      verifyAdmin, // only admin can proceed
+      async (req, res) => {
+        const { email, newRole } = req.body;
+
+        if (!email || !newRole) {
+          return res
+            .status(400)
+            .json({ message: "Email and newRole required" });
+        }
+
+        if (!["admin", "clubManager", "member"].includes(newRole)) {
+          return res.status(400).json({ message: "Invalid role" });
+        }
+
+        // Admin cannot demote self
+        if (email === req.requestedBy && newRole !== "admin") {
+          return res
+            .status(403)
+            .json({ message: "Admin cannot demote himself" });
+        }
+
+        const result = await userCollection.updateOne(
+          { email },
+          { $set: { role: newRole, updatedAt: new Date() } }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.json({ success: true, message: `Role updated to ${newRole}` });
+      }
+    );
+
     console.log("MongoDB Connected + All Routes Ready");
   } catch (err) {
     console.error("MongoDB connection error:", err);
