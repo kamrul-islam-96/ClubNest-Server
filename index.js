@@ -508,6 +508,78 @@ async function run() {
       }
     });
 
+    // GET /api/member/summary?email=
+    app.get("/api/member/summary", verifyFirebaseToken, async (req, res) => {
+      const { email } = req.query;
+      if (!email) return res.status(400).json({ message: "email required" });
+
+      const clubsJoined = await membershipCollection.countDocuments({
+        userEmail: email,
+        status: "active",
+      });
+
+      res.json({
+        clubsJoined,
+        eventsRegistered: 0, // 🔹 events এখনো implement করো নাই
+      });
+    });
+
+    // GET /api/member/clubs?email=
+    app.get("/api/member/clubs", verifyFirebaseToken, async (req, res) => {
+      const { email } = req.query;
+      if (!email) return res.status(400).json({ message: "email required" });
+
+      const memberships = await membershipCollection
+        .find({ userEmail: email })
+        .toArray();
+
+      const clubs = await Promise.all(
+        memberships.map(async (m) => {
+          const club = await clubsCollection.findOne({
+            _id: new ObjectId(m.clubId),
+          });
+
+          return {
+            id: club?._id,
+            name: club?.clubName,
+            location: club?.location,
+            membershipStatus: m.status,
+            expiryDate: m.expiresAt || "N/A",
+          };
+        })
+      );
+
+      res.json(clubs);
+    });
+
+    // GET /api/member/payments?email=
+    app.get("/api/member/payments", verifyFirebaseToken, async (req, res) => {
+      const { email } = req.query;
+      if (!email) return res.status(400).json({ message: "email required" });
+
+      const memberships = await membershipCollection
+        .find({ userEmail: email })
+        .toArray();
+
+      const payments = await Promise.all(
+        memberships.map(async (m) => {
+          const club = await clubsCollection.findOne({
+            _id: new ObjectId(m.clubId),
+          });
+
+          return {
+            amount: club?.membershipFee || 0,
+            type: "Membership",
+            club: club?.clubName || "Unknown",
+            date: m.updatedAt || m.joinedAt,
+            status: club?.membershipFee > 0 ? "Paid" : "Free", // paid বা free
+          };
+        })
+      );
+
+      res.json(payments); // সব membership return হবে
+    });
+
     console.log("MongoDB Connected + All Routes Ready");
   } catch (err) {
     console.error("MongoDB connection error:", err);
