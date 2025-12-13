@@ -375,6 +375,43 @@ async function run() {
       }
     );
 
+    // GET /memberships?managerEmail=...
+    app.get("/memberships", verifyFirebaseToken, async (req, res) => {
+      try {
+        const { managerEmail } = req.query;
+        if (!managerEmail) {
+          return res.status(400).json({ message: "managerEmail required" });
+        }
+
+        // manager এর ক্লাবগুলো
+        const clubs = await clubsCollection.find({ managerEmail }).toArray();
+        const clubMap = {};
+        clubs.forEach((c) => {
+          clubMap[c._id.toString()] = c.clubName;
+        });
+
+        const clubIds = Object.keys(clubMap);
+
+        const memberships = await membershipCollection
+          .find({ clubId: { $in: clubIds } })
+          .toArray();
+
+        const result = memberships.map((m) => ({
+          _id: m._id,
+          userEmail: m.userEmail,
+          clubId: m.clubId,
+          clubName: clubMap[m.clubId],
+          status: m.status,
+          joinedAt: m.joinedAt,
+        }));
+
+        res.json(result); // ✅ always array
+      } catch (err) {
+        console.error(err);
+        res.status(500).json([]);
+      }
+    });
+
     // Confirm Membership after Payment Success
     app.patch(
       "/memberships/:id/confirm",
@@ -435,7 +472,7 @@ async function run() {
       }
     );
 
-    // backend/server.js বা যেখানে তুমি routes লিখেছ
+    // payments data show
     app.get("/api/payments", verifyFirebaseToken, async (req, res) => {
       try {
         const db = client.db("clubnest");
