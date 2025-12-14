@@ -412,6 +412,21 @@ async function run() {
       }
     });
 
+    // Get all memberships (for admin summary card)
+    app.get(
+      "/api/memberships",
+      verifyFirebaseToken,
+      async (req, res) => {
+        try {
+          const memberships = await membershipCollection.find({}).toArray();
+          res.json(memberships);
+        } catch (err) {
+          console.error(err);
+          res.status(500).json([]);
+        }
+      }
+    );
+
     // Confirm Membership after Payment Success
     app.patch(
       "/memberships/:id/confirm",
@@ -578,6 +593,52 @@ async function run() {
       );
 
       res.json(payments); // সব membership return হবে
+    });
+
+    // 🔥 Manager Dashboard Summary
+    app.get("/api/manager/summary", verifyFirebaseToken, async (req, res) => {
+      try {
+        const { email } = req.query;
+        if (!email) {
+          return res.status(400).json({ message: "manager email required" });
+        }
+
+        const db = client.db("clubnest");
+        const clubsCollection = db.collection("clubs");
+        const membershipCollection = db.collection("memberships");
+
+        // 1️⃣ Manager Clubs
+        const clubs = await clubsCollection
+          .find({ managerEmail: email })
+          .toArray();
+        const clubIds = clubs.map((c) => c._id.toString());
+
+        // 2️⃣ Members of manager clubs
+        const membersCount = await membershipCollection.countDocuments({
+          clubId: { $in: clubIds },
+        });
+
+        // 3️⃣ Payments (paid memberships only)
+        const paymentsCount = await membershipCollection.countDocuments({
+          clubId: { $in: clubIds },
+          paymentId: { $ne: null },
+        });
+
+        res.json({
+          totalClubs: clubs.length,
+          totalMembers: membersCount,
+          totalEvents: 0, // assignment allowed
+          totalPayments: paymentsCount,
+        });
+      } catch (error) {
+        console.error(error);
+        res.status(500).json({
+          totalClubs: 0,
+          totalMembers: 0,
+          totalEvents: 0,
+          totalPayments: 0,
+        });
+      }
     });
 
     console.log("MongoDB Connected + All Routes Ready");
