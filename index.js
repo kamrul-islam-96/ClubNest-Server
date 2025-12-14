@@ -52,6 +52,8 @@ async function run() {
     const userCollection = db.collection("users");
     const clubsCollection = db.collection("clubs");
     const membershipCollection = db.collection("memberships");
+    const eventsCollection = db.collection("events");
+    const eventRegistrationsCollection = db.collection("eventRegistrations");
 
     // MIDDLEWARE: Verify Admin
     const verifyAdmin = async (req, res, next) => {
@@ -668,6 +670,274 @@ async function run() {
           console.error("Memberships per club error:", error);
           res.status(500).json([]);
         }
+      }
+    );
+    
+    // Create Event (Manager Only)
+    app.post("/events", verifyFirebaseToken, async (req, res) => {
+      const {
+        clubId,
+        title,
+        description,
+        eventDate,
+        location,
+        isPaid,
+        eventFee,
+        maxAttendees,
+      } = req.body;
+
+      // Required fields check
+      if (!clubId || !title || !eventDate) {
+        return res.status(400).json({ message: "Required fields missing" });
+      }
+
+      // Find club
+      const club = await clubsCollection.findOne({ _id: new ObjectId(clubId) });
+      if (!club) return res.status(404).json({ message: "Club not found" });
+
+      // Only club manager can create event
+      if (club.managerEmail !== req.decodedUser.email) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      // Prepare new event object
+      const newEvent = {
+        clubId,
+        title,
+        description,
+        eventDate: new Date(eventDate),
+        location,
+        isPaid: !!isPaid, // convert to boolean
+        eventFee: Number(eventFee) || 0,
+        maxAttendees: maxAttendees || null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      // Insert into DB
+      const result = await eventsCollection.insertOne(newEvent);
+      res.json({ success: true, eventId: result.insertedId });
+    });
+
+    //  Get Manager's Events
+    app.get("/events/manager", verifyFirebaseToken, async (req, res) => {
+      const managerEmail = req.decodedUser.email;
+
+      // Get clubs managed by this user
+      const clubs = await clubsCollection.find({ managerEmail }).toArray();
+      const clubIds = clubs.map((c) => c._id.toString());
+
+      // Get events for these clubs
+      const events = await eventsCollection
+        .find({ clubId: { $in: clubIds } })
+        .toArray();
+
+      // Add clubName and registeredUsers length for each event
+      const detailedEvents = await Promise.all(
+        events.map(async (ev) => {
+          const club = clubs.find(
+            (c) => c._id.toString() === ev.clubId.toString()
+          );
+          const registeredUsers = await eventRegistrationsCollection
+            .find({ eventId: ev._id.toString(), status: "registered" })
+            .toArray();
+          return {
+            ...ev,
+            clubName: club?.clubName || "Unknown Club",
+            registeredUsersCount: registeredUsers.length,
+          };
+        })
+      );
+
+      res.json(detailedEvents);
+    });
+
+    // Get All Events (Public)
+    app.get("/events", async (req, res) => {
+      const events = await eventsCollection
+        .find({})
+        .sort({ eventDate: 1 })
+        .toArray();
+
+      const detailedEvents = await Promise.all(
+        events.map(async (ev) => {
+          const club = await clubsCollection.findOne({
+            _id: new ObjectId(ev.clubId),
+          });
+          return {
+            ...ev,
+            clubName: club?.clubName || "Unknown Club",
+          };
+        })
+      );
+
+      res.json(detailedEvents);
+    });
+
+    // Get Single Event
+    app.get("/events/:id", async (req, res) => {
+      const { id } = req.params;
+
+      const event = await eventsCollection.findOne({ _id: new ObjectId(id) });
+      if (!event) return res.status(404).json({ message: "Event not found" });
+
+      res.json(event);
+    });
+
+    // Update Event (Manager Only)
+    app.patch("/events/:id", verifyFirebaseToken, async (req, res) => {
+      const { id } = req.params;
+      const updates = req.body;
+
+      const event = await eventsCollection.findOne({ _id: new ObjectId(id) });
+      if (!event) return res.status(404).json({ message: "Event not found" });
+
+      // Only manager of the club can update
+      const club = await clubsCollection.findOne({
+        _id: new ObjectId(event.clubId),
+      });
+      if (club.managerEmail !== req.decodedUser.email) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      updates.updatedAt = new Date();
+      await eventsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: updates }
+      );
+
+      res.json({ success: true, message: "Event updated" });
+    });
+
+    // Delete Event (Manager Only)
+    app.delete("/events/:id", verifyFirebaseToken, async (req, res) => {
+      const { id } = req.params;
+
+      const event = await eventsCollection.findOne({ _id: new ObjectId(id) });
+      if (!event) return res.status(404).json({ message: "Event not found" });
+
+      // Only manager of the club can delete
+      const club = await clubsCollection.findOne({
+        _id: new ObjectId(event.clubId),
+      });
+      if (club.managerEmail !== req.decodedUser.email) {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      await eventsCollection.deleteOne({ _id: new ObjectId(id) });
+      res.json({ success: true, message: "Event deleted" });
+    });
+
+    // Register for Event (Member)
+    app.post("/event-registrations", verifyFirebaseToken, async (req, res) => {
+      const { eventId } = req.body;
+      const userEmail = req.decodedUser.email;
+
+      const event = await eventsCollection.findOne({
+        _id: new ObjectId(eventId),
+      });
+      if (!event) return res.status(404).json({ message: "Event not found" });
+
+      // Check if already registered
+      const alreadyRegistered = await eventRegistrationsCollection.findOne({
+        eventId,
+        userEmail,
+      });
+      if (alreadyRegistered)
+        return res.status(400).json({ message: "Already registered" });
+
+      // Prepare registration
+      const registration = {
+        eventId,
+        clubId: event.clubId,
+        userEmail,
+        status: event.isPaid ? "pendingPayment" : "registered",
+        paymentId: null,
+        registeredAt: new Date(),
+      };
+
+      const result = await eventRegistrationsCollection.insertOne(registration);
+      res.json({
+        success: true,
+        registrationId: result.insertedId,
+        status: registration.status,
+      });
+    });
+
+    // Create Payment Intent (Stripe) for Paid Event
+    app.post(
+      "/create-event-payment-intent",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { eventId } = req.body;
+
+        const event = await eventsCollection.findOne({
+          _id: new ObjectId(eventId),
+        });
+        if (!event) return res.status(404).json({ message: "Event not found" });
+        if (!event.isPaid)
+          return res.status(400).json({ message: "Event is free" });
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: Math.round(event.eventFee * 100), // convert to cents
+          currency: "usd", // currency
+          metadata: { eventId, userEmail: req.decodedUser.email },
+        });
+
+        res.json({ clientSecret: paymentIntent.client_secret });
+      }
+    );
+
+    // Confirm Event Registration After Payment
+    app.patch(
+      "/event-registrations/:id/confirm",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { id } = req.params;
+        const { paymentId } = req.body;
+
+        const registration = await eventRegistrationsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+        if (!registration)
+          return res.status(404).json({ message: "Registration not found" });
+
+        await eventRegistrationsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: "registered", paymentId, updatedAt: new Date() } }
+        );
+
+        res.json({ success: true, message: "Event registration confirmed" });
+      }
+    );
+
+    // Get User's Event Registrations (Member Dashboard)
+    app.get(
+      "/api/member/event-registrations",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const userEmail = req.decodedUser.email;
+
+        const registrations = await eventRegistrationsCollection
+          .find({ userEmail })
+          .toArray();
+
+        // Populate event details
+        const detailed = await Promise.all(
+          registrations.map(async (r) => {
+            const event = await eventsCollection.findOne({
+              _id: new ObjectId(r.eventId),
+            });
+            return {
+              ...r,
+              eventTitle: event?.title,
+              eventDate: event?.eventDate,
+              clubId: event?.clubId,
+            };
+          })
+        );
+
+        res.json(detailed);
       }
     );
 
