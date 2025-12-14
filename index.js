@@ -413,19 +413,15 @@ async function run() {
     });
 
     // Get all memberships (for admin summary card)
-    app.get(
-      "/api/memberships",
-      verifyFirebaseToken,
-      async (req, res) => {
-        try {
-          const memberships = await membershipCollection.find({}).toArray();
-          res.json(memberships);
-        } catch (err) {
-          console.error(err);
-          res.status(500).json([]);
-        }
+    app.get("/api/memberships", verifyFirebaseToken, async (req, res) => {
+      try {
+        const memberships = await membershipCollection.find({}).toArray();
+        res.json(memberships);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json([]);
       }
-    );
+    });
 
     // Confirm Membership after Payment Success
     app.patch(
@@ -595,7 +591,7 @@ async function run() {
       res.json(payments); // সব membership return হবে
     });
 
-    // 🔥 Manager Dashboard Summary
+    //  Manager Dashboard Summary
     app.get("/api/manager/summary", verifyFirebaseToken, async (req, res) => {
       try {
         const { email } = req.query;
@@ -640,6 +636,40 @@ async function run() {
         });
       }
     });
+
+    // 🔥 Admin: Memberships per Club (Chart Data)
+    app.get(
+      "/api/admin/memberships-per-club",
+      verifyFirebaseToken,
+      verifyAdmin,
+      async (req, res) => {
+        try {
+          const db = client.db("clubnest");
+          const clubsCollection = db.collection("clubs");
+          const membershipCollection = db.collection("memberships");
+
+          const clubs = await clubsCollection.find({}).toArray();
+
+          const data = await Promise.all(
+            clubs.map(async (club) => {
+              const totalMembers = await membershipCollection.countDocuments({
+                clubId: club._id.toString(),
+              });
+
+              return {
+                clubName: club.clubName,
+                totalMembers,
+              };
+            })
+          );
+
+          res.json(data);
+        } catch (error) {
+          console.error("Memberships per club error:", error);
+          res.status(500).json([]);
+        }
+      }
+    );
 
     console.log("MongoDB Connected + All Routes Ready");
   } catch (err) {
