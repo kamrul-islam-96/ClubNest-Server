@@ -328,34 +328,84 @@ async function run() {
       }
     );
 
-    // Create Membership route updated to handle free vs paid
+    // Create Membership route with validation - UPDATED
     app.post("/memberships", verifyFirebaseToken, async (req, res) => {
-      const { userEmail, clubId } = req.body;
-      if (!userEmail || !clubId)
-        return res.status(400).json({ message: "Missing fields" });
+      try {
+        const { userEmail, clubId } = req.body;
 
-      // 🔹 fetch club to check membership fee
-      const club = await clubsCollection.findOne({ _id: new ObjectId(clubId) }); // 🔹 new
-      if (!club) return res.status(404).json({ message: "Club not found" }); // 🔹 new
+        if (!userEmail || !clubId) {
+          return res.status(400).json({ message: "Missing fields" });
+        }
 
-      // 🔹 determine initial membership status based on fee
-      const status = club.membershipFee > 0 ? "pendingPayment" : "active"; // 🔹 new
+        // 🔹 Check if user is already a member of this club
+        const existingMembership = await membershipCollection.findOne({
+          userEmail,
+          clubId,
+        });
 
-      const membershipData = {
-        userEmail,
-        clubId,
-        status,
-        paymentId: null,
-        joinedAt: new Date(),
-        expiresAt: null,
-      };
+        if (existingMembership) {
+          // If already has active membership
+          if (existingMembership.status === "active") {
+            return res.status(400).json({
+              success: false,
+              message: "You are already a member of this club",
+              membershipId: existingMembership._id,
+              status: existingMembership.status,
+            });
+          }
 
-      const result = await membershipCollection.insertOne(membershipData);
-      res.json({
-        success: true,
-        membershipId: result.insertedId,
-        status,
-      });
+          // If has pending payment membership
+          if (existingMembership.status === "pendingPayment") {
+            return res.json({
+              success: true,
+              membershipId: existingMembership._id,
+              status: existingMembership.status,
+              message: "Continue with your pending payment",
+              existing: true,
+            });
+          }
+        }
+
+        // 🔹 fetch club to check membership fee
+        const club = await clubsCollection.findOne({
+          _id: new ObjectId(clubId),
+        });
+        if (!club) {
+          return res.status(404).json({ message: "Club not found" });
+        }
+
+        // 🔹 determine initial membership status based on fee
+        const status = club.membershipFee > 0 ? "pendingPayment" : "active";
+
+        const membershipData = {
+          userEmail,
+          clubId,
+          status,
+          paymentId: null,
+          joinedAt: new Date(),
+          expiresAt: null,
+          updatedAt: new Date(),
+        };
+
+        const result = await membershipCollection.insertOne(membershipData);
+
+        res.json({
+          success: true,
+          membershipId: result.insertedId,
+          status,
+          existing: false,
+          message:
+            status === "active"
+              ? "Successfully joined the club!"
+              : "Membership created! Please complete payment.",
+        });
+      } catch (error) {
+        console.error("Create membership error:", error);
+        res.status(500).json({
+          success: false,
+          message: "Server error: " + error.message,
+        });
+      }
     });
 
     // Create Payment Intent route (for paid memberships)
@@ -411,6 +461,103 @@ async function run() {
       } catch (err) {
         console.error(err);
         res.status(500).json([]);
+      }
+    });
+
+    // Check if user is already a member of club
+    app.get("/check-membership", verifyFirebaseToken, async (req, res) => {
+      try {
+        const { clubId } = req.query;
+        const userEmail = req.decodedUser.email;
+
+        if (!clubId) {
+          return res.status(400).json({ message: "Club ID required" });
+        }
+
+        const membership = await membershipCollection.findOne({
+          clubId,
+          userEmail,
+        });
+
+        // Check for active membership
+        const isActiveMember = membership && membership.status === "active";
+        const hasPendingPayment =
+          membership && membership.status === "pendingPayment";
+
+        res.json({
+          isMember: isActiveMember,
+          hasPendingPayment,
+          membershipId: membership?._id,
+          status: membership?.status,
+          joinedAt: membership?.joinedAt,
+        });
+      } catch (error) {
+        console.error("Check membership error:", error);
+        res.status(500).json({
+          isMember: false,
+          hasPendingPayment: false,
+          status: "error",
+        });
+      }
+    });
+
+    app.get("/clubs/:id", async (req, res) => {
+      const { id } = req.params;
+
+      try {
+        const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
+        if (!club) return res.status(404).json({ message: "Club not found" });
+
+        // Active members count
+        const membersCount = await membershipCollection.countDocuments({
+          clubId: id,
+          status: "active",
+        });
+
+        // Manager info
+        const manager = await userCollection.findOne({
+          email: club.managerEmail,
+        });
+
+        // Check if current user is a member (if token provided)
+        let isMember = false;
+        let membershipStatus = null;
+        let membershipId = null;
+
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith("Bearer ")) {
+          try {
+            const token = authHeader.split(" ")[1];
+            const decoded = await admin.auth().verifyIdToken(token);
+
+            const userMembership = await membershipCollection.findOne({
+              clubId: id,
+              userEmail: decoded.email,
+            });
+
+            if (userMembership) {
+              isMember = userMembership.status === "active";
+              membershipStatus = userMembership.status;
+              membershipId = userMembership._id;
+            }
+          } catch (tokenError) {
+            // Token error, ignore membership check
+            console.log("Token verification failed, skipping membership check");
+          }
+        }
+
+        res.json({
+          ...club,
+          membersCount,
+          managerName: manager?.name || "Unknown",
+          managerEmail: manager?.email || club.managerEmail,
+          isMember,
+          membershipStatus,
+          membershipId,
+        });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Server error" });
       }
     });
 
@@ -1014,42 +1161,6 @@ async function run() {
       await eventsCollection.deleteOne({ _id: new ObjectId(id) });
       res.json({ success: true, message: "Event deleted" });
     });
-
-    // Register for Event (Member)
-    // app.post("/event-registrations", verifyFirebaseToken, async (req, res) => {
-    //   const { eventId } = req.body;
-    //   const userEmail = req.decodedUser.email;
-
-    //   const event = await eventsCollection.findOne({
-    //     _id: new ObjectId(eventId),
-    //   });
-    //   if (!event) return res.status(404).json({ message: "Event not found" });
-
-    //   // Check if already registered
-    //   const alreadyRegistered = await eventRegistrationsCollection.findOne({
-    //     eventId,
-    //     userEmail,
-    //   });
-    //   if (alreadyRegistered)
-    //     return res.status(400).json({ message: "Already registered" });
-
-    //   // Prepare registration
-    //   const registration = {
-    //     eventId,
-    //     clubId: event.clubId,
-    //     userEmail,
-    //     status: event.isPaid ? "pendingPayment" : "registered",
-    //     paymentId: null,
-    //     registeredAt: new Date(),
-    //   };
-
-    //   const result = await eventRegistrationsCollection.insertOne(registration);
-    //   res.json({
-    //     success: true,
-    //     registrationId: result.insertedId,
-    //     status: registration.status,
-    //   });
-    // });
 
     // Create Payment Intent (Stripe) for Paid Event
     app.post(
