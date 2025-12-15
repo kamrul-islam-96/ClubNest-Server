@@ -672,7 +672,7 @@ async function run() {
         }
       }
     );
-    
+
     // Create Event (Manager Only)
     app.post("/events", verifyFirebaseToken, async (req, res) => {
       const {
@@ -781,7 +781,194 @@ async function run() {
       const event = await eventsCollection.findOne({ _id: new ObjectId(id) });
       if (!event) return res.status(404).json({ message: "Event not found" });
 
-      res.json(event);
+      const club = await clubsCollection.findOne({
+        _id: new ObjectId(event.clubId),
+      });
+
+      // 🔹 রেজিস্টার্ড ইউজার কাউন্ট
+      const registeredCount = await eventRegistrationsCollection.countDocuments(
+        {
+          eventId: id,
+          status: "registered",
+        }
+      );
+
+      res.json({
+        ...event,
+        clubName: club?.clubName || "Unknown Club",
+        registeredCount, // ✅ নতুন ফিল্ড
+      });
+    });
+
+    // Get Event Registration Details for Checkout
+    app.get(
+      "/event-registrations/:id",
+      verifyFirebaseToken,
+      async (req, res) => {
+        const { id } = req.params;
+
+        const registration = await eventRegistrationsCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!registration)
+          return res.status(404).json({ message: "Registration not found" });
+
+        const event = await eventsCollection.findOne({
+          _id: new ObjectId(registration.eventId),
+        });
+
+        res.json({
+          registrationId: registration._id,
+          event,
+          userEmail: registration.userEmail,
+        });
+      }
+    );
+
+    // Check event registration - UPDATED VERSION
+    app.get(
+      "/check-event-registration",
+      verifyFirebaseToken,
+      async (req, res) => {
+        try {
+          const { eventId } = req.query;
+          const userEmail = req.decodedUser.email;
+
+          console.log(
+            "Checking registration for event:",
+            eventId,
+            "user:",
+            userEmail
+          );
+
+          // ✅ Check for ANY registration (not just "registered" status)
+          const registration = await eventRegistrationsCollection.findOne({
+            eventId,
+            userEmail,
+          });
+
+          console.log("Found registration:", registration);
+
+          res.json({
+            isRegistered: !!registration,
+            registrationId: registration?._id,
+            status: registration?.status || "not_registered",
+            needsPayment: registration?.status === "pendingPayment",
+          });
+        } catch (error) {
+          console.error("Check registration error:", error);
+          res.status(500).json({
+            isRegistered: false,
+            status: "error",
+          });
+        }
+      }
+    );
+
+    // Update event registration route to allow re-payment attempt
+    app.post("/event-registrations", verifyFirebaseToken, async (req, res) => {
+      try {
+        const { eventId } = req.body;
+        const userEmail = req.decodedUser.email;
+
+        console.log(
+          "Registration attempt for event:",
+          eventId,
+          "by:",
+          userEmail
+        );
+
+        // 1. Validate event
+        const event = await eventsCollection.findOne({
+          _id: new ObjectId(eventId),
+        });
+        if (!event) {
+          return res.status(404).json({ message: "Event not found" });
+        }
+
+        // 2. Check if event date passed
+        if (new Date(event.eventDate) < new Date()) {
+          return res.status(400).json({ message: "Event has already passed" });
+        }
+
+        // 3. Check max attendees
+        if (event.maxAttendees) {
+          const registeredCount =
+            await eventRegistrationsCollection.countDocuments({
+              eventId,
+              status: "registered",
+            });
+
+          if (registeredCount >= event.maxAttendees) {
+            return res.status(400).json({ message: "Event is full" });
+          }
+        }
+
+        // 4. Check if already registered
+        const existing = await eventRegistrationsCollection.findOne({
+          eventId,
+          userEmail,
+        });
+
+        // ✅ If already exists with pendingPayment, return that registration ID
+        if (existing) {
+          if (existing.status === "pendingPayment") {
+            return res.json({
+              success: true,
+              registrationId: existing._id,
+              status: existing.status,
+              message: "Continue with payment",
+              existing: true,
+            });
+          } else if (existing.status === "registered") {
+            return res.status(400).json({
+              message: "Already registered",
+              registrationId: existing._id,
+            });
+          }
+        }
+
+        // 5. Get club info
+        const club = await clubsCollection.findOne({
+          _id: new ObjectId(event.clubId),
+        });
+
+        // 6. Create NEW registration
+        const registration = {
+          eventId,
+          clubId: event.clubId,
+          userEmail,
+          clubName: club?.clubName,
+          eventTitle: event.title,
+          eventFee: event.eventFee,
+          status: event.isPaid ? "pendingPayment" : "registered",
+          paymentId: null,
+          registeredAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        const result = await eventRegistrationsCollection.insertOne(
+          registration
+        );
+
+        res.json({
+          success: true,
+          registrationId: result.insertedId,
+          status: registration.status,
+          requiresPayment: event.isPaid,
+          message: event.isPaid
+            ? "Please complete payment to confirm registration"
+            : "Successfully registered for event",
+          existing: false,
+        });
+      } catch (err) {
+        console.error("Registration error:", err);
+        res.status(500).json({
+          success: false,
+          message: "Server error: " + err.message,
+        });
+      }
     });
 
     // Update Event (Manager Only)
@@ -829,40 +1016,40 @@ async function run() {
     });
 
     // Register for Event (Member)
-    app.post("/event-registrations", verifyFirebaseToken, async (req, res) => {
-      const { eventId } = req.body;
-      const userEmail = req.decodedUser.email;
+    // app.post("/event-registrations", verifyFirebaseToken, async (req, res) => {
+    //   const { eventId } = req.body;
+    //   const userEmail = req.decodedUser.email;
 
-      const event = await eventsCollection.findOne({
-        _id: new ObjectId(eventId),
-      });
-      if (!event) return res.status(404).json({ message: "Event not found" });
+    //   const event = await eventsCollection.findOne({
+    //     _id: new ObjectId(eventId),
+    //   });
+    //   if (!event) return res.status(404).json({ message: "Event not found" });
 
-      // Check if already registered
-      const alreadyRegistered = await eventRegistrationsCollection.findOne({
-        eventId,
-        userEmail,
-      });
-      if (alreadyRegistered)
-        return res.status(400).json({ message: "Already registered" });
+    //   // Check if already registered
+    //   const alreadyRegistered = await eventRegistrationsCollection.findOne({
+    //     eventId,
+    //     userEmail,
+    //   });
+    //   if (alreadyRegistered)
+    //     return res.status(400).json({ message: "Already registered" });
 
-      // Prepare registration
-      const registration = {
-        eventId,
-        clubId: event.clubId,
-        userEmail,
-        status: event.isPaid ? "pendingPayment" : "registered",
-        paymentId: null,
-        registeredAt: new Date(),
-      };
+    //   // Prepare registration
+    //   const registration = {
+    //     eventId,
+    //     clubId: event.clubId,
+    //     userEmail,
+    //     status: event.isPaid ? "pendingPayment" : "registered",
+    //     paymentId: null,
+    //     registeredAt: new Date(),
+    //   };
 
-      const result = await eventRegistrationsCollection.insertOne(registration);
-      res.json({
-        success: true,
-        registrationId: result.insertedId,
-        status: registration.status,
-      });
-    });
+    //   const result = await eventRegistrationsCollection.insertOne(registration);
+    //   res.json({
+    //     success: true,
+    //     registrationId: result.insertedId,
+    //     status: registration.status,
+    //   });
+    // });
 
     // Create Payment Intent (Stripe) for Paid Event
     app.post(
