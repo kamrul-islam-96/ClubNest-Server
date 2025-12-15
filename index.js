@@ -165,6 +165,124 @@ async function run() {
       }
     );
 
+    // Delete Club (Manager Only)
+    app.delete("/clubs/:id",  async (req, res) => {
+      try {
+        const { id } = req.params;
+        const userEmail = req.decodedUser.email;
+
+        console.log("Delete request for club:", id, "by:", userEmail);
+
+        // Validate ObjectId
+        if (!ObjectId.isValid(id)) {
+          console.log("Invalid ObjectId:", id);
+          return res.status(400).json({
+            success: false,
+            message: "Invalid club ID format",
+          });
+        }
+
+        // Find the club
+        const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
+        if (!club) {
+          console.log("Club not found:", id);
+          return res.status(404).json({
+            success: false,
+            message: "Club not found",
+          });
+        }
+
+        // Check if user is the manager of this club
+        if (club.managerEmail !== userEmail) {
+          console.log(
+            "Forbidden: User",
+            userEmail,
+            "tried to delete club of",
+            club.managerEmail
+          );
+          return res.status(403).json({
+            success: false,
+            message: "Forbidden: You can only delete your own clubs",
+          });
+        }
+
+        // Check if club is approved (optional restriction)
+        if (club.status === "approved") {
+          console.log("Club is approved, checking for active members...");
+
+          // Check if club has active members
+          const activeMembers = await membershipCollection.countDocuments({
+            clubId: id,
+            status: "active",
+          });
+
+          if (activeMembers > 0) {
+            return res.status(400).json({
+              success: false,
+              message:
+                "Cannot delete club with active members. Please remove all members first.",
+            });
+          }
+        }
+
+        // Check if club has events
+        const clubEvents = await eventsCollection.countDocuments({
+          clubId: id,
+        });
+        if (clubEvents > 0) {
+          console.log("Club has events, deleting events first...");
+          await eventsCollection.deleteMany({ clubId: id });
+        }
+
+        // Delete all related data first
+        console.log("Deleting related memberships...");
+        await membershipCollection.deleteMany({ clubId: id });
+
+        // Delete event registrations for this club's events
+        const clubEventIds = await eventsCollection
+          .find({ clubId: id })
+          .project({ _id: 1 })
+          .toArray();
+        const eventIds = clubEventIds.map((e) => e._id.toString());
+
+        if (eventIds.length > 0) {
+          console.log("Deleting event registrations...");
+          await eventRegistrationsCollection.deleteMany({
+            eventId: { $in: eventIds },
+          });
+        }
+
+        // Delete club events
+        await eventsCollection.deleteMany({ clubId: id });
+
+        // Finally delete the club
+        console.log("Deleting club...");
+        const result = await clubsCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (result.deletedCount === 1) {
+          console.log("Club deleted successfully:", id);
+          res.json({
+            success: true,
+            message: "Club deleted successfully",
+          });
+        } else {
+          console.log("Failed to delete club:", id);
+          res.status(500).json({
+            success: false,
+            message: "Failed to delete club",
+          });
+        }
+      } catch (error) {
+        console.error("Delete club error:", error);
+        res.status(500).json({
+          success: false,
+          message: "Server error: " + error.message,
+        });
+      }
+    });
+
     app.post("/clubs", async (req, res) => {
       const {
         clubName,
@@ -219,54 +337,104 @@ async function run() {
       res.json(allClubs);
     });
 
-    app.get("/clubs/:id", async (req, res) => {
-      const { id } = req.params;
+    // app.get("/clubs/:id", async (req, res) => {
+    //   const { id } = req.params;
 
-      try {
-        const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
-        if (!club) return res.status(404).json({ message: "Club not found" });
+    //   try {
+    //     const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
+    //     if (!club) return res.status(404).json({ message: "Club not found" });
 
-        // Active members count
-        const membersCount = await membershipCollection
-          .find({ clubId: id, status: "active" })
-          .count();
+    //     // Active members count
+    //     const membersCount = await membershipCollection
+    //       .find({ clubId: id, status: "active" })
+    //       .count();
 
-        // Manager info
-        const manager = await userCollection.findOne({
-          email: club.managerEmail,
-        });
+    //     // Manager info
+    //     const manager = await userCollection.findOne({
+    //       email: club.managerEmail,
+    //     });
 
-        res.json({
-          ...club,
-          membersCount,
-          managerName: manager?.name || "Unknown",
-          managerEmail: manager?.email || club.managerEmail,
-        });
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ message: "Server error" });
-      }
-    });
+    //     res.json({
+    //       ...club,
+    //       membersCount,
+    //       managerName: manager?.name || "Unknown",
+    //       managerEmail: manager?.email || club.managerEmail,
+    //     });
+    //   } catch (err) {
+    //     console.error(err);
+    //     res.status(500).json({ message: "Server error" });
+    //   }
+    // });
 
+    // Update Club (Manager Only) - Already exists but improve it
     app.patch("/clubs/:id", verifyFirebaseToken, async (req, res) => {
-      const { id } = req.params;
-      const updates = req.body;
+      try {
+        const { id } = req.params;
+        const updates = req.body;
+        const userEmail = req.decodedUser.email;
 
-      const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
-      if (!club) return res.status(404).json({ message: "Club not found" });
+        // Validate ObjectId
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({ message: "Invalid club ID" });
+        }
 
-      if (club.managerEmail !== req.decodedUser.email) {
-        return res.status(403).json({ message: "Forbidden" });
+        // Find the club
+        const club = await clubsCollection.findOne({ _id: new ObjectId(id) });
+        if (!club) {
+          return res.status(404).json({ message: "Club not found" });
+        }
+
+        // Check if user is the manager of this club
+        if (club.managerEmail !== userEmail) {
+          return res.status(403).json({
+            message: "Forbidden: You can only edit your own clubs",
+          });
+        }
+
+        // Remove fields that shouldn't be updated
+        const allowedUpdates = {
+          clubName: updates.clubName,
+          description: updates.description,
+          category: updates.category,
+          location: updates.location,
+          bannerImage: updates.bannerImage,
+          membershipFee: Number(updates.membershipFee) || 0,
+          updatedAt: new Date(),
+        };
+
+        // Remove undefined fields
+        Object.keys(allowedUpdates).forEach((key) => {
+          if (allowedUpdates[key] === undefined) {
+            delete allowedUpdates[key];
+          }
+        });
+
+        // Update club
+        const result = await clubsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: allowedUpdates }
+        );
+
+        if (result.modifiedCount === 1) {
+          res.json({
+            success: true,
+            message: "Club updated successfully",
+            updatedClub: { ...club, ...allowedUpdates },
+          });
+        } else {
+          res.json({
+            success: true,
+            message: "No changes detected",
+            updatedClub: club,
+          });
+        }
+      } catch (error) {
+        console.error("Update club error:", error);
+        res.status(500).json({
+          success: false,
+          message: "Server error: " + error.message,
+        });
       }
-
-      updates.updatedAt = new Date();
-
-      await clubsCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: updates }
-      );
-
-      res.json({ success: true, message: "Club updated" });
     });
 
     app.get(
