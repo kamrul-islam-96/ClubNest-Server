@@ -47,7 +47,7 @@ const verifyFirebaseToken = async (req, res, next) => {
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
     const db = client.db("clubnest");
     const userCollection = db.collection("users");
     const clubsCollection = db.collection("clubs");
@@ -310,19 +310,151 @@ async function run() {
     });
 
     app.get("/clubs", async (req, res) => {
-      const { managerEmail } = req.query;
+      try {
+        const {
+          managerEmail,
+          sortBy = "createdAt",
+          order = "desc",
+          search = "",
+          category = "",
+          membershipFee,
+        } = req.query;
 
-      if (managerEmail) {
-        // Only fetch clubs managed by logged-in manager
-        const clubs = await clubsCollection.find({ managerEmail }).toArray();
-        return res.json(clubs);
+        console.log("📡 /clubs API Called with:", {
+          sortBy,
+          order,
+          search,
+          category,
+          membershipFee,
+        });
+
+        // Build base query
+        let query = {};
+
+        if (managerEmail) {
+          query.managerEmail = managerEmail;
+        } else {
+          query.status = "approved";
+        }
+
+        // Search filter
+        if (search && search.trim() !== "") {
+          const searchTerm = search.trim();
+          query.clubName = { $regex: searchTerm, $options: "i" };
+        }
+
+        // Category filter
+        if (category && category !== "" && category !== "all") {
+          query.category = category;
+        }
+
+        // FIX: Membership fee filter - string to number conversion
+        if (membershipFee && membershipFee !== "all") {
+          if (membershipFee === "free") {
+            // Free = membershipFee is 0 or empty or null
+            query.$or = [
+              { membershipFee: 0 },
+              { membershipFee: "0" },
+              { membershipFee: "" },
+              { membershipFee: null },
+              { membershipFee: { $exists: false } },
+            ];
+            console.log("💰 Free clubs filter applied");
+          } else if (membershipFee === "paid") {
+            // Paid = membershipFee is greater than 0 (handle both string and number)
+            query.$and = [
+              {
+                $or: [
+                  { membershipFee: { $gt: 0 } },
+                  { membershipFee: { $gt: "0" } },
+                ],
+              },
+              { membershipFee: { $ne: "" } },
+              { membershipFee: { $ne: null } },
+            ];
+            console.log("💰 Paid clubs filter applied");
+          }
+        }
+
+        console.log("📊 Final query:", JSON.stringify(query, null, 2));
+
+        // Sorting
+        let sortField = "createdAt";
+        let sortDirection = 1;
+
+        // Map frontend sort options to MongoDB sort
+        switch (sortBy) {
+          case "newest":
+            sortField = "createdAt";
+            sortDirection = order === "desc" ? -1 : 1;
+            break;
+          case "oldest":
+            sortField = "createdAt";
+            sortDirection = order === "asc" ? 1 : -1;
+            break;
+          case "nameAsc":
+            sortField = "clubName";
+            sortDirection = 1;
+            break;
+          case "nameDesc":
+            sortField = "clubName";
+            sortDirection = -1;
+            break;
+          case "feeLowest":
+            // Sort by numeric value of membershipFee
+            sortField = "membershipFee";
+            sortDirection = 1;
+            break;
+          case "feeHighest":
+            // Sort by numeric value of membershipFee
+            sortField = "membershipFee";
+            sortDirection = -1;
+            break;
+          default:
+            sortField = "createdAt";
+            sortDirection = -1;
+        }
+
+        // Execute query
+        const clubs = await clubsCollection
+          .find(query)
+          .sort({ [sortField]: sortDirection })
+          .toArray();
+
+        console.log(`✅ Found ${clubs.length} clubs`);
+
+        // Convert string membershipFee to number for proper sorting
+        const formattedClubs = clubs.map((club) => {
+          // Convert membershipFee to number if it's a string
+          let fee = club.membershipFee;
+          if (typeof fee === "string") {
+            fee = parseFloat(fee) || 0;
+          }
+
+          return {
+            ...club,
+            membershipFee: fee,
+            _id: club._id.toString(),
+          };
+        });
+
+        // If sorting by fee, sort again on formatted data (for mixed string/number data)
+        if (sortBy === "feeLowest" || sortBy === "feeHighest") {
+          formattedClubs.sort((a, b) => {
+            const feeA = a.membershipFee;
+            const feeB = b.membershipFee;
+            return sortDirection === 1 ? feeA - feeB : feeB - feeA;
+          });
+        }
+
+        res.json(formattedClubs);
+      } catch (err) {
+        console.error("❌ Error in /clubs endpoint:", err);
+        res.status(500).json({
+          error: "Server error",
+          message: err.message,
+        });
       }
-
-      // Optional: return all approved clubs for public pages
-      const allClubs = await clubsCollection
-        .find({ status: "approved" })
-        .toArray();
-      res.json(allClubs);
     });
 
     // app.get("/clubs/:id", async (req, res) => {
@@ -942,7 +1074,7 @@ async function run() {
       }
     });
 
-    // 🔥 Admin: Memberships per Club (Chart Data)
+    // Admin: Memberships per Club (Chart Data)
     app.get(
       "/api/admin/memberships-per-club",
       verifyFirebaseToken,
